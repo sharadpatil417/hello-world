@@ -247,6 +247,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstDll, DWORD fdwReason, LPVOID lpvReserved)
 #elif defined(GIT_THREADS) && defined(_POSIX_THREADS)
 
 static pthread_key_t _tls_key;
+static pthread_mutex_t _init_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t _once_init = PTHREAD_ONCE_INIT;
 int init_error = 0;
 
@@ -258,12 +259,19 @@ static void cb__free_status(void *st)
 
 static void init_once(void)
 {
-	if ((init_error = git_mutex_init(&git__mwindow_mutex)) != 0)
+	if ((init_error = pthread_mutex_lock(&_init_mutex)) != 0)
 		return;
+
+	if ((init_error = git_mutex_init(&git__mwindow_mutex)) != 0)
+		goto out;
 
 	pthread_key_create(&_tls_key, &cb__free_status);
 
-	init_error = init_common();
+	if ((init_error = init_common()) != 0)
+		goto out;
+
+out:
+	init_error |= pthread_mutex_unlock(&_init_mutex);
 }
 
 int git_libgit2_init(void)
@@ -285,6 +293,9 @@ int git_libgit2_shutdown(void)
 	if ((ret = git_atomic_dec(&git__n_inits)) != 0)
 		return ret;
 
+	if ((ret = pthread_mutex_lock(&_init_mutex)) != 0)
+		return ret;
+
 	/* Shut down any subsystems that have global state */
 	shutdown_common();
 
@@ -297,6 +308,9 @@ int git_libgit2_shutdown(void)
 	pthread_key_delete(_tls_key);
 	git_mutex_free(&git__mwindow_mutex);
 	_once_init = new_once;
+
+	if ((ret = pthread_mutex_unlock(&_init_mutex)) != 0)
+		return ret;
 
 	return 0;
 }
